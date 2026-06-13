@@ -14,6 +14,13 @@ const {
   deleteAccount,
 } = require("../controllers/authController");
 
+router.get("/forgot-password-test", (req, res) => {
+  res.status(200).json({
+    success: true,
+    message: "Forgot password route is deployed",
+  });
+});
+
 router.post("/register", registerUser);
 
 router.post("/login", loginUser);
