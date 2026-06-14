@@ -2,7 +2,9 @@ const db = require("../config/db");
 const bcrypt = require("bcryptjs");
 const jwt = require("jsonwebtoken");
 const crypto = require("crypto");
-const transporter = require("../config/email");
+const { Resend } = require("resend");
+
+const resend = new Resend(process.env.RESEND_API_KEY);
 
 const loginUser = async (req, res) => {
   try {
@@ -113,6 +115,20 @@ const forgotPassword = async (req, res) => {
       });
     }
 
+    if (!process.env.RESEND_API_KEY) {
+      return res.status(500).json({
+        success: false,
+        message: "Email service is not configured",
+      });
+    }
+
+    if (!process.env.FRONTEND_URL) {
+      return res.status(500).json({
+        success: false,
+        message: "Frontend URL is not configured",
+      });
+    }
+
     const [users] = await db.execute("SELECT * FROM users WHERE email = ?", [
       email,
     ]);
@@ -146,37 +162,57 @@ const forgotPassword = async (req, res) => {
 
     const resetLink = `${process.env.FRONTEND_URL}/reset-password/${resetToken}`;
 
-    await transporter.sendMail({
-      from: `"Job Tracker" <${process.env.EMAIL_USER}>`,
+    const emailResult = await resend.emails.send({
+      from: "Job Tracker <onboarding@resend.dev>",
       to: user.email,
       subject: "Reset Your Job Tracker Password",
       html: `
         <div style="font-family: Arial, sans-serif; background:#f8fafc; padding:30px;">
-          <div style="max-width:600px; margin:auto; background:white; padding:30px; border-radius:18px;">
-            <h2 style="color:#2563eb;">Reset Your Password</h2>
-            <p>Hello ${user.name},</p>
-            <p>We received a request to reset your Job Tracker password.</p>
-            <p>Click the button below to create a new password.</p>
-            <a href="${resetLink}" style="display:inline-block; padding:14px 22px; background:#2563eb; color:white; text-decoration:none; border-radius:12px; font-weight:bold;">
+          <div style="max-width:600px; margin:auto; background:white; padding:30px; border-radius:18px; border:1px solid #e5e7eb;">
+            <h2 style="color:#2563eb; margin-bottom:10px;">Reset Your Password</h2>
+
+            <p style="font-size:16px; color:#334155;">Hello ${user.name},</p>
+
+            <p style="font-size:15px; color:#475569; line-height:1.7;">
+              We received a request to reset your Job Tracker password.
+              Click the button below to create a new password.
+            </p>
+
+            <a href="${resetLink}" style="display:inline-block; margin-top:16px; padding:14px 22px; background:#2563eb; color:white; text-decoration:none; border-radius:12px; font-weight:bold;">
               Reset Password
             </a>
-            <p style="margin-top:20px;">This link will expire in 15 minutes.</p>
-            <p>If you did not request this, please ignore this email.</p>
+
+            <p style="margin-top:24px; font-size:14px; color:#64748b;">
+              This link will expire in 15 minutes.
+            </p>
+
+            <p style="font-size:14px; color:#64748b;">
+              If you did not request this, please ignore this email.
+            </p>
           </div>
         </div>
       `,
     });
+
+    if (emailResult.error) {
+      console.error("Resend Error:", emailResult.error);
+
+      return res.status(500).json({
+        success: false,
+        message: emailResult.error.message || "Failed to send reset email",
+      });
+    }
 
     res.status(200).json({
       success: true,
       message: "Password reset link sent to your email",
     });
   } catch (error) {
-    console.error(error);
+    console.error("Forgot Password Error:", error);
 
     res.status(500).json({
       success: false,
-      message: "Failed to send reset email",
+      message: error.message || "Failed to send reset email",
     });
   }
 };
