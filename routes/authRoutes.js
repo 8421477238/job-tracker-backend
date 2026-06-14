@@ -6,6 +6,8 @@ const verifyToken = require("../middleware/authMiddleware");
 const {
   registerUser,
   loginUser,
+  googleLogin,
+  googleCallback,
   forgotPassword,
   resetPassword,
   getProfile,
@@ -20,6 +22,10 @@ router.get("/forgot-password-test", (req, res) => {
     message: "Forgot password route is deployed",
   });
 });
+
+router.get("/google", googleLogin);
+
+router.get("/google/callback", googleCallback);
 
 router.post("/register", registerUser);
 

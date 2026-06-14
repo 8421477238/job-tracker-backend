@@ -6,6 +6,19 @@ const { Resend } = require("resend");
 
 const resend = new Resend(process.env.RESEND_API_KEY);
 
+const createToken = (user) => {
+  return jwt.sign(
+    {
+      id: user.id,
+      email: user.email,
+    },
+    process.env.JWT_SECRET,
+    {
+      expiresIn: "7d",
+    }
+  );
+};
+
 const loginUser = async (req, res) => {
   try {
     const { email, password } = req.body;
@@ -32,16 +45,7 @@ const loginUser = async (req, res) => {
       });
     }
 
-    const token = jwt.sign(
-      {
-        id: user.id,
-        email: user.email,
-      },
-      process.env.JWT_SECRET,
-      {
-        expiresIn: "7d",
-      }
-    );
+    const token = createToken(user);
 
     res.status(200).json({
       success: true,
@@ -61,6 +65,129 @@ const loginUser = async (req, res) => {
       success: false,
       message: "Server Error",
     });
+  }
+};
+
+const googleLogin = (req, res) => {
+  const redirectUri =
+    process.env.GOOGLE_REDIRECT_URI ||
+    "https://job-tracker-backend-production-90a8.up.railway.app/api/auth/google/callback";
+
+  const googleAuthUrl =
+    "https://accounts.google.com/o/oauth2/v2/auth?" +
+    new URLSearchParams({
+      client_id: process.env.GOOGLE_CLIENT_ID,
+      redirect_uri: redirectUri,
+      response_type: "code",
+      scope: "openid email profile",
+      access_type: "offline",
+      prompt: "select_account",
+    }).toString();
+
+  res.redirect(googleAuthUrl);
+};
+
+const googleCallback = async (req, res) => {
+  try {
+    const { code } = req.query;
+
+    if (!code) {
+      return res.redirect(`${process.env.FRONTEND_URL}/?googleError=true`);
+    }
+
+    const redirectUri =
+      process.env.GOOGLE_REDIRECT_URI ||
+      "https://job-tracker-backend-production-90a8.up.railway.app/api/auth/google/callback";
+
+    const tokenResponse = await fetch("https://oauth2.googleapis.com/token", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/x-www-form-urlencoded",
+      },
+      body: new URLSearchParams({
+        code,
+        client_id: process.env.GOOGLE_CLIENT_ID,
+        client_secret: process.env.GOOGLE_CLIENT_SECRET,
+        redirect_uri: redirectUri,
+        grant_type: "authorization_code",
+      }),
+    });
+
+    const tokenData = await tokenResponse.json();
+
+    if (!tokenData.access_token) {
+      console.error("Google Token Error:", tokenData);
+      return res.redirect(`${process.env.FRONTEND_URL}/?googleError=true`);
+    }
+
+    const userResponse = await fetch(
+      "https://www.googleapis.com/oauth2/v2/userinfo",
+      {
+        headers: {
+          Authorization: `Bearer ${tokenData.access_token}`,
+        },
+      }
+    );
+
+    const googleUser = await userResponse.json();
+
+    if (!googleUser.email) {
+      return res.redirect(`${process.env.FRONTEND_URL}/?googleError=true`);
+    }
+
+    const [existingUsers] = await db.execute(
+      "SELECT * FROM users WHERE email = ?",
+      [googleUser.email]
+    );
+
+    let user;
+
+    if (existingUsers.length > 0) {
+      user = existingUsers[0];
+    } else {
+      const randomPassword = crypto.randomBytes(32).toString("hex");
+      const hashedPassword = await bcrypt.hash(randomPassword, 10);
+
+      await db.execute(
+        `
+        INSERT INTO users
+        (name, email, password, career_role)
+        VALUES (?, ?, ?, ?)
+        `,
+        [
+          googleUser.name || "Google User",
+          googleUser.email,
+          hashedPassword,
+          "Career Candidate",
+        ]
+      );
+
+      const [newUsers] = await db.execute(
+        "SELECT * FROM users WHERE email = ?",
+        [googleUser.email]
+      );
+
+      user = newUsers[0];
+    }
+
+    const token = createToken(user);
+
+    const userData = encodeURIComponent(
+      JSON.stringify({
+        id: user.id,
+        name: user.name,
+        email: user.email,
+        mobile: user.mobile,
+        career_role: user.career_role,
+      })
+    );
+
+    res.redirect(
+      `${process.env.FRONTEND_URL}/google-success?token=${token}&user=${userData}`
+    );
+  } catch (error) {
+    console.error("Google Login Error:", error);
+    res.redirect(`${process.env.FRONTEND_URL}/?googleError=true`);
   }
 };
 
@@ -115,20 +242,6 @@ const forgotPassword = async (req, res) => {
       });
     }
 
-    if (!process.env.RESEND_API_KEY) {
-      return res.status(500).json({
-        success: false,
-        message: "Email service is not configured",
-      });
-    }
-
-    if (!process.env.FRONTEND_URL) {
-      return res.status(500).json({
-        success: false,
-        message: "Frontend URL is not configured",
-      });
-    }
-
     const [users] = await db.execute("SELECT * FROM users WHERE email = ?", [
       email,
     ]);
@@ -141,7 +254,6 @@ const forgotPassword = async (req, res) => {
     }
 
     const user = users[0];
-
     const resetToken = crypto.randomBytes(32).toString("hex");
 
     const hashedToken = crypto
@@ -169,34 +281,19 @@ const forgotPassword = async (req, res) => {
       html: `
         <div style="font-family: Arial, sans-serif; background:#f8fafc; padding:30px;">
           <div style="max-width:600px; margin:auto; background:white; padding:30px; border-radius:18px; border:1px solid #e5e7eb;">
-            <h2 style="color:#2563eb; margin-bottom:10px;">Reset Your Password</h2>
-
-            <p style="font-size:16px; color:#334155;">Hello ${user.name},</p>
-
-            <p style="font-size:15px; color:#475569; line-height:1.7;">
-              We received a request to reset your Job Tracker password.
-              Click the button below to create a new password.
-            </p>
-
-            <a href="${resetLink}" style="display:inline-block; margin-top:16px; padding:14px 22px; background:#2563eb; color:white; text-decoration:none; border-radius:12px; font-weight:bold;">
+            <h2 style="color:#2563eb;">Reset Your Password</h2>
+            <p>Hello ${user.name},</p>
+            <p>Click below to reset your Job Tracker password.</p>
+            <a href="${resetLink}" style="display:inline-block; padding:14px 22px; background:#2563eb; color:white; text-decoration:none; border-radius:12px; font-weight:bold;">
               Reset Password
             </a>
-
-            <p style="margin-top:24px; font-size:14px; color:#64748b;">
-              This link will expire in 15 minutes.
-            </p>
-
-            <p style="font-size:14px; color:#64748b;">
-              If you did not request this, please ignore this email.
-            </p>
+            <p>This link will expire in 15 minutes.</p>
           </div>
         </div>
       `,
     });
 
     if (emailResult.error) {
-      console.error("Resend Error:", emailResult.error);
-
       return res.status(500).json({
         success: false,
         message: emailResult.error.message || "Failed to send reset email",
@@ -233,13 +330,6 @@ const resetPassword = async (req, res) => {
       return res.status(400).json({
         success: false,
         message: "Passwords do not match",
-      });
-    }
-
-    if (newPassword.length < 6) {
-      return res.status(400).json({
-        success: false,
-        message: "Password must be at least 6 characters",
       });
     }
 
@@ -329,22 +419,6 @@ const updateProfile = async (req, res) => {
       });
     }
 
-    const [existingEmail] = await db.execute(
-      `
-      SELECT id
-      FROM users
-      WHERE email = ? AND id != ?
-      `,
-      [email, req.user.id]
-    );
-
-    if (existingEmail.length > 0) {
-      return res.status(400).json({
-        success: false,
-        message: "Email already used by another account",
-      });
-    }
-
     await db.execute(
       `
       UPDATE users
@@ -382,37 +456,9 @@ const changePassword = async (req, res) => {
   try {
     const { currentPassword, newPassword, confirmPassword } = req.body;
 
-    if (!currentPassword || !newPassword || !confirmPassword) {
-      return res.status(400).json({
-        success: false,
-        message: "All password fields are required",
-      });
-    }
-
-    if (newPassword !== confirmPassword) {
-      return res.status(400).json({
-        success: false,
-        message: "New password and confirm password do not match",
-      });
-    }
-
-    if (newPassword.length < 6) {
-      return res.status(400).json({
-        success: false,
-        message: "New password must be at least 6 characters",
-      });
-    }
-
     const [users] = await db.execute("SELECT password FROM users WHERE id = ?", [
       req.user.id,
     ]);
-
-    if (users.length === 0) {
-      return res.status(404).json({
-        success: false,
-        message: "User not found",
-      });
-    }
 
     const isMatch = await bcrypt.compare(currentPassword, users[0].password);
 
@@ -465,6 +511,8 @@ const deleteAccount = async (req, res) => {
 module.exports = {
   registerUser,
   loginUser,
+  googleLogin,
+  googleCallback,
   forgotPassword,
   resetPassword,
   getProfile,
